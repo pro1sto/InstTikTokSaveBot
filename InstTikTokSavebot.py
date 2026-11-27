@@ -30,14 +30,12 @@ from aiogram.types import (
 
 # ================= НАСТРОЙКИ =================
 BOT_TOKEN = os.getenv("BOT_TOKEN")
-ADMIN_IDS = [994444870]  # Ваш Telegram ID (узнать можно у @userinfobot)
+ADMIN_IDS = [994444870]
 
 # Список каналов для обязательной подписки.
 # ВАЖНО: Бота нужно добавить в эти каналы АДМИНИСТРАТОРОМ!
 REQUIRED_CHANNELS = [
     {"id": "-1006003972835", "url": "https://t.me/+afPTm145m0JhNjcy", "name": "ПОДПИСАТЬСЯ"},
-    # Можно добавить второй канал:
-    # {"id": "-1001234567890", "url": "https://t.me/...", "name": "Закрытый канал"},
 ]
 # =============================================
 
@@ -55,6 +53,7 @@ dp = Dispatcher()
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 DB_PATH = os.path.join(BASE_DIR, "bot.db")
 DOWNLOAD_DIR = os.path.join(BASE_DIR, "downloads")
+COOKIES_PATH = os.path.join(BASE_DIR, "cookies.txt")
 os.makedirs(DOWNLOAD_DIR, exist_ok=True)
 
 is_sending = False
@@ -128,7 +127,6 @@ async def check_subscription(user_id: int) -> bool:
                 return False
         except Exception as e:
             logging.error(f"Ошибка проверки канала {channel['id']}: {e}")
-            # Если бот не админ в канале, пропускаем проверку, чтобы бот не сломался
             continue
     return True
 
@@ -154,6 +152,9 @@ def download_instagram_video(url: str) -> str:
         "quiet": True,
         "no_warnings": True,
     }
+    if os.path.exists(COOKIES_PATH):
+        ydl_opts["cookiefile"] = COOKIES_PATH
+
     with yt_dlp.YoutubeDL(ydl_opts) as ydl:
         info = ydl.extract_info(url, download=True)
         return ydl.prepare_filename(info)
@@ -185,11 +186,9 @@ def get_tiktok_media_sync(url: str):
 
         data = result.get("data") or {}
 
-        # Фото-слайдшоу
         if data.get("images"):
             return {"type": "images", "urls": data["images"]}
 
-        # Видео
         play_url = data.get("play")
         if play_url:
             play_url = urllib.parse.urljoin("https://www.tikwm.com/", play_url)
@@ -212,10 +211,6 @@ def download_tiktok_video_sync(url: str):
             },
         )
         with urllib.request.urlopen(req, timeout=60) as response:
-            content_type = response.headers.get("Content-Type", "").lower()
-            if "video" not in content_type and "octet-stream" not in content_type:
-                logging.warning("Неожиданный тип файла: %s", content_type)
-
             temp = tempfile.NamedTemporaryFile(
                 dir=DOWNLOAD_DIR, suffix=".mp4", delete=False
             )
@@ -243,22 +238,21 @@ async def cmd_start(message: types.Message):
         )
         return
 
-    await message.answer(
-        "👋 <b>Привет!</b>
+    welcome_text = """👋 <b>Привет!</b>
 
-"
-        "Отправь мне ссылку на видео или фото-пост из <b>TikTok</b>, "
-        "либо на открытый Reels / видео из <b>Instagram</b>, и я скачаю его.",
-        parse_mode="HTML",
-    )
+Отправь мне ссылку на видео из <b>TikTok</b> (включая фото-посты) или на открытый Reels / видео из <b>Instagram</b>, и я скачаю его."""
+    await message.answer(welcome_text, parse_mode="HTML")
 
 
 @dp.callback_query(F.data == "check_sub")
 async def callback_check_sub(callback: CallbackQuery):
     if await check_subscription(callback.from_user.id):
-        await callback.message.edit_text(
-            "✅ Спасибо за подписку! Теперь отправь ссылку на видео из TikTok или Instagram."
-        )
+        try:
+            await callback.message.edit_text(
+                "✅ Спасибо за подписку! Теперь отправь ссылку на видео из TikTok или Instagram."
+            )
+        except TelegramBadRequest:
+            pass
     else:
         await callback.answer("❌ Вы подписались не на все каналы!", show_alert=True)
 
@@ -298,12 +292,10 @@ async def process_tiktok(message: types.Message, url: str):
     tt_data = await asyncio.to_thread(get_tiktok_media_sync, url)
 
     if not tt_data:
-        await status_msg.edit_text(
-            "❌ Не удалось получить медиа.
+        err_text = """❌ Не удалось получить медиа.
 
-"
-            "Возможно, ролик удалён, закрыт или сервис загрузки временно недоступен."
-        )
+Возможно, ролик удалён, закрыт или сервис загрузки временно недоступен."""
+        await status_msg.edit_text(err_text)
         return
 
     temp_path = None
@@ -352,11 +344,9 @@ async def process_tiktok(message: types.Message, url: str):
     except Exception:
         logging.exception("Ошибка отправки медиа TikTok")
         try:
-            await status_msg.edit_text(
-                "❌ Ошибка отправки файла.
-"
-                "Возможно, видео слишком большое или Telegram не поддерживает его формат."
-            )
+            send_err = """❌ Ошибка отправки файла.
+Возможно, видео слишком большое или Telegram не поддерживает его формат."""
+            await status_msg.edit_text(send_err)
         except Exception:
             pass
     finally:
@@ -444,19 +434,17 @@ async def admin_stats(callback: CallbackQuery):
     if callback.from_user.id not in ADMIN_IDS:
         return
     total, new_today, downloads = get_stats()
-    text = (
-        "📊 <b>Статистика бота:</b>
+    text = f"""📊 <b>Статистика бота:</b>
 
-"
-        f"👥 Всего пользователей: <b>{total}</b>
-"
-        f"🆕 Новых за 24 часа: <b>{new_today}</b>
-"
-        f"📥 Скачано файлов: <b>{downloads}</b>"
-    )
-    await callback.message.edit_text(
-        text, reply_markup=get_admin_keyboard(), parse_mode="HTML"
-    )
+👥 Всего пользователей: <b>{total}</b>
+🆕 Новых за 24 часа: <b>{new_today}</b>
+📥 Скачано файлов: <b>{downloads}</b>"""
+    try:
+        await callback.message.edit_text(
+            text, reply_markup=get_admin_keyboard(), parse_mode="HTML"
+        )
+    except TelegramBadRequest:
+        await callback.answer("Данные актуальны")
 
 
 @dp.callback_query(F.data == "admin_broadcast")
@@ -472,10 +460,10 @@ async def admin_broadcast_start(callback: CallbackQuery, state: FSMContext):
             [InlineKeyboardButton(text="❌ Отмена", callback_data="admin_cancel")]
         ]
     )
+    prompt_text = """✉️ Отправьте сообщение для рассылки (текст, фото, видео или кружок):
+<i>Для экстренной остановки используйте /stop_send</i>"""
     await callback.message.edit_text(
-        "✉️ Отправьте сообщение для рассылки (текст, фото, видео или кружок):
-"
-        "<i>Для экстренной остановки используйте /stop_send</i>",
+        prompt_text,
         reply_markup=cancel_kb,
         parse_mode="HTML",
     )
@@ -538,30 +526,22 @@ async def process_broadcast(message: types.Message, state: FSMContext):
                 remove_users_bulk(dead_batch)
                 dead_batch.clear()
                 try:
-                    await status_msg.edit_text(
-                        f"⏳ Рассылка: {i}/{total}
-"
-                        f"📩 Доставлено: {sent}
-"
-                        f"🗑 Удалено мёртвых: {blocked}"
-                    )
+                    prog_text = f"""⏳ Рассылка: {i}/{total}
+📩 Доставлено: {sent}
+🗑 Удалено мёртвых: {blocked}"""
+                    await status_msg.edit_text(prog_text)
                 except TelegramBadRequest:
                     pass
     finally:
         remove_users_bulk(dead_batch)
         is_sending = False
 
-    await status_msg.edit_text(
-        f"✅ <b>Рассылка завершена!</b>
+    done_text = f"""✅ <b>Рассылка завершена!</b>
 
-"
-        f"📩 Успешно доставлено: <b>{sent}</b>
-"
-        f"🗑 Удалено из базы (заблокировали): <b>{blocked}</b>
-"
-        f"👥 Активных в базе: <b>{get_stats()[0]}</b>",
-        parse_mode="HTML",
-    )
+📩 Успешно доставлено: <b>{sent}</b>
+🗑 Удалено из базы (заблокировали): <b>{blocked}</b>
+👥 Активных в базе: <b>{get_stats()[0]}</b>"""
+    await status_msg.edit_text(done_text, parse_mode="HTML")
 
 
 async def main():
